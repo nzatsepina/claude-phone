@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   branch     TEXT,
   worktree   TEXT,
   cwd        TEXT,
-  iterm_id   TEXT,
+  iterm_id   TEXT,  -- the terminal to type into: an iTerm2 unique id, or tmux:<socket>:<pane>
   status     TEXT NOT NULL DEFAULT 'idle',
   started_at REAL NOT NULL,
   updated_at REAL NOT NULL
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS injections (
   ts         REAL NOT NULL,
   session_id TEXT,
   ext        INTEGER,
-  iterm_id   TEXT,
+  iterm_id   TEXT,  -- the terminal to type into: an iTerm2 unique id, or tmux:<socket>:<pane>
   source     TEXT NOT NULL,
   text       TEXT NOT NULL,
   result     TEXT NOT NULL
@@ -162,7 +162,7 @@ def by_ext(ext: int) -> Session | None:
 
 
 def find(session_id: str | None, iterm_id: str | None = None) -> Session | None:
-    """Look up by session id, falling back to the iTerm tab (the MCP server's env keeps the
+    """Look up by session id, falling back to the terminal tab (the MCP server's env keeps the
     first session id even after /clear starts a new one in the same tab)."""
     with connect() as db:
         if session_id:
@@ -175,7 +175,7 @@ def find(session_id: str | None, iterm_id: str | None = None) -> Session | None:
 
 
 def remove_missing(live_iterm_ids: set[str]) -> list[Session]:
-    """Drop sessions whose iTerm session no longer exists. Returns the removed rows."""
+    """Drop sessions whose iTerm2 session or tmux pane no longer exists. Returns the removed rows."""
     gone = [s for s in all_sessions() if s.iterm_id and s.iterm_id not in live_iterm_ids]
     with connect() as db:
         for s in gone:

@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import os
 import re
+import socket
 import subprocess
+import sys
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
 HOME = Path(os.environ.get("CLAUDE_PHONE_HOME", Path.home() / ".claude-phone"))
 REPO = Path(__file__).resolve().parent.parent
+# macOS: iTerm2, `say`, the keychain, launchd. Anything else (Linux, Windows via WSL): tmux, Piper, a secrets file, systemd.
+MAC = sys.platform == "darwin"
 
 ASTERISK_PREFIX = HOME / "asterisk"
 ASTERISK_BIN = ASTERISK_PREFIX / "sbin" / "asterisk"
@@ -21,6 +25,7 @@ DB_PATH = HOME / "registry.db"
 SOUNDS = HOME / "sounds"
 RECORDINGS = HOME / "recordings"
 MODELS = HOME / "models"
+VOICES = HOME / "voices"  # Piper voice models
 LOGS = HOME / "logs"
 LOG_FILE = LOGS / "phone.log"
 CONFIG_FILE = HOME / "config.toml"
@@ -30,7 +35,7 @@ CONFIG_FILE = HOME / "config.toml"
 class Settings:
     # Who the phone is for. Spoken and typed as this name; the MCP tools become call_<name> and notify_<name>.
     owner_name: str = "the user"
-    # Empty: this Mac's address on its default route, and that /24. Pin both once the Mac has a DHCP reservation.
+    # Empty: this computer's address on its default route, and that /24. Pin both once it has a DHCP reservation.
     lan_ip: str = ""
     lan_cidr: str = ""
     desk_ext: str = "200"
@@ -40,8 +45,8 @@ class Settings:
     voicemail_ext: str = "500"
     allhands_ext: str = "9"
     operator_ext: str = "0"
-    operator_provider: str = "say"
-    operator_voice: str = "Shelley (English (UK))"
+    operator_provider: str = "say" if MAC else "piper"
+    operator_voice: str = "Shelley (English (UK))" if MAC else "en_GB-cori-medium"
     first_session_ext: int = 301  # not 1xx: UK 101 is the police, 111 the NHS
     last_session_ext: int = 399
     ari_port: int = 8088
@@ -51,8 +56,9 @@ class Settings:
     ring_seconds: int = 25
     record_seconds: int = 60
     callerid_max: int = 17  # T31P shows 17 chars before scrolling (tested 2026-10-09)
-    tts_provider: str = "say"
+    tts_provider: str = "say" if MAC else "piper"
     say_voice: str = "Daniel"
+    piper_voice: str = "en_GB-alan-medium"  # https://rhasspy.github.io/piper-samples/
     elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
     elevenlabs_model: str = "eleven_turbo_v2_5"
     # repo name -> {"provider": ..., "voice": ...}
@@ -61,7 +67,7 @@ class Settings:
     phonebook_port: int = 8766
     # repo name -> T31P ringtone 1-8. Unlisted repos get a stable pick from their name.
     repo_ringtones: dict = field(default_factory=dict)
-    # Push to the ntfy app when a call is missed. The topic is a secret in the keychain (`phone push`).
+    # Push to the ntfy app when a call is missed. The topic is a secret (`phone push`).
     ntfy_server: str = "https://ntfy.sh"
     push_text: bool = True  # include the question/announcement; False sends only who called
 
@@ -111,8 +117,14 @@ def bound_ip() -> str | None:
 
 
 def detect_lan_ip() -> str | None:
-    """IPv4 address of the interface on this Mac's default route."""
+    """IPv4 address of the interface on this computer's default route."""
     try:
+        if not MAC:  # Connecting a UDP socket sends nothing but picks the default route's source address.
+            # Under WSL, mirrored networking makes that Windows' LAN address.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+                sk.connect(("192.0.2.1", 9))
+                ip = sk.getsockname()[0]
+            return ip if ip != "0.0.0.0" else None
         route = subprocess.run(["route", "-n", "get", "default"], capture_output=True, text=True, timeout=5).stdout
         iface = next(line.split(":", 1)[1].strip() for line in route.splitlines() if "interface:" in line)
         ip = subprocess.run(["ipconfig", "getifaddr", iface], capture_output=True, text=True, timeout=5).stdout.strip()
@@ -122,7 +134,11 @@ def detect_lan_ip() -> str | None:
 
 
 def current_lan_ips() -> set[str]:
-    """IPv4 addresses on this Mac, to spot the Wi-Fi address drifting away from lan_ip."""
+    """IPv4 addresses on this computer, to spot the Wi-Fi address drifting away from lan_ip."""
+    if not MAC:  # The kernel's local routes: each "|-- <ip>" followed by "/32 host LOCAL" is one of ours.
+        lines = Path("/proc/net/fib_trie").read_text().splitlines()
+        ips = {lines[i - 1].split()[-1] for i, line in enumerate(lines) if "/32 host LOCAL" in line}
+        return {ip for ip in ips if not ip.startswith("127.")}
     out = subprocess.run(["ifconfig"], capture_output=True, text=True).stdout
     return {line.split()[1] for line in out.splitlines() if line.strip().startswith("inet ") and "127.0.0.1" not in line}
 
@@ -131,14 +147,14 @@ def ip_warning() -> str | None:
     s = load()
     ip = bound_ip() or s.lan_ip
     if not ip:
-        return "This Mac has no network address, so the desk phone can't be reached."
+        return "This computer has no network address, so the desk phone can't be reached."
     if ip in current_lan_ips():
         return None
-    return (f"This Mac doesn't have {ip}, so the desk phone can't be reached: calls go to voicemail "
+    return (f"This computer doesn't have {ip}, so the desk phone can't be reached: calls go to voicemail "
             f"and missed-call pushes. Away from home, that's expected. If the home address changed for good, set "
             f"lan_ip in {CONFIG_FILE}, run `phone restart asterisk`, and update the SIP server on the phones.")
 
 
 def ensure_dirs() -> None:
-    for d in (HOME, ASTERISK_ETC, SOUNDS, RECORDINGS, MODELS, LOGS):
+    for d in (HOME, ASTERISK_ETC, SOUNDS, RECORDINGS, MODELS, VOICES, LOGS):
         d.mkdir(parents=True, exist_ok=True)

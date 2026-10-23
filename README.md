@@ -2,8 +2,10 @@
 
 A desk phone becomes the line between you and your Claude Code sessions.
 
-> **Mac only (Apple Silicon, M1 or later).** It relies on macOS throughout: iTerm2 scripting to type into
-> sessions, the `say` voices, the keychain and launchd. There are no Windows, Linux or Intel Mac instructions.
+> **Apple Silicon Mac, or Windows with WSL 2.** The instructions below are for the Mac (iTerm2, the `say` voices,
+> the keychain, launchd). On Windows everything runs inside WSL 2 with tmux, Piper voices and systemd instead:
+> follow [docs/windows-wsl.md](docs/windows-wsl.md). An ordinary analog phone works through a SIP adapter:
+> [docs/analog-phone.md](docs/analog-phone.md).
 
 - **Claude rings you:** a session calls the `call_<name>` MCP tool (`call_sam` for `owner_name = "Sam"`). The phone rings with `repo/branch` as caller ID; the spoken answer comes back as the tool result.
 - **Claude announces:** `notify_<name>` rings, reads a short announcement and hangs up.
@@ -23,7 +25,9 @@ are text to ElevenLabs, if you choose it, and missed-call pushes, if you set the
   The T31P is powered over the network cable (PoE), and second-hand ones often come without a power supply:
   without a PoE switch or injector, buy the Yealink 5 V power adapter as well.
   Other SIP phones should work but are untested; per-repo ringtones and the live session list are Yealink features.
-- No desk phone yet? [Linphone](https://linphone.org) (free, Mac or mobile) works for trying everything out.
+- Or an ordinary analog (landline-style) phone plugged into a SIP adapter such as a Grandstream HT801:
+  [docs/analog-phone.md](docs/analog-phone.md). You lose per-repo ringtones and the on-screen session list.
+- No desk phone yet? [Linphone](https://linphone.org) (free, Mac, Windows or mobile) works for trying everything out.
 - Python 3.12+, Xcode command line tools (to build Asterisk), and about 1 GB of disk for the speech model.
 - No accounts or subscriptions. ElevenLabs (nicer voices) and ntfy (missed-call pushes) are optional.
 

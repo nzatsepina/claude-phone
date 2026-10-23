@@ -106,17 +106,27 @@ def py_argv(*args: str) -> list[str]:
     return [sys.executable, "-m", "claude_phone", *args]
 
 
+def whisper_server() -> str:
+    """Homebrew's on a Mac; elsewhere the one scripts/build-whisper.sh builds."""
+    built = config.HOME / "whisper" / "bin" / "whisper-server"
+    return shutil.which("whisper-server") or str("/opt/homebrew/bin/whisper-server" if config.MAC else built)
+
+
+# Apple Silicon is fast on 4 threads; a PC transcribes on CPU, so give it more.
+WHISPER_THREADS = 4 if config.MAC else min(8, os.cpu_count() or 4)
+
 SERVICES = {
     "asterisk": lambda s: asterisk_cmd("-f", "-n"),
-    "whisper": lambda s: [shutil.which("whisper-server") or "/opt/homebrew/bin/whisper-server", "-m", str(model_path()), "--host", "127.0.0.1",
-                          "--port", str(s.whisper_port), "-t", "4", "--no-timestamps", "-l", "en"],
+    "whisper": lambda s: [whisper_server(), "-m", str(model_path()), "--host", "127.0.0.1",
+                          "--port", str(s.whisper_port), "-t", str(WHISPER_THREADS), "--no-timestamps", "-l", "en"],
     "daemon": lambda s: py_argv("daemon"),
 }
 
 
-# --- launchd (user agents; no sudo) ---
+# --- service manager: launchd user agents on a Mac, systemd user units elsewhere (no sudo either way) ---
 
 AGENTS = Path.home() / "Library" / "LaunchAgents"
+MANAGER = "launchd" if config.MAC else "systemd"
 
 
 def _label(name: str) -> str:
@@ -127,8 +137,8 @@ def _plist(name: str) -> Path:
     return AGENTS / f"{_label(name)}.plist"
 
 
-def _launchd(name: str) -> bool:
-    return _plist(name).exists()
+def _managed(name: str) -> bool:
+    return _plist(name).exists() if config.MAC else _unit(name).exists()
 
 
 def _launchctl(*args: str) -> subprocess.CompletedProcess:
@@ -140,6 +150,10 @@ def _domain() -> str:
 
 
 def _agent_pid(name: str) -> int | None:
+    if not config.MAC:
+        r = _systemctl("show", "-p", "MainPID", "--value", _unit(name).name)
+        pid = r.stdout.strip()
+        return int(pid) if pid.isdigit() and pid != "0" else None
     r = _launchctl("print", f"{_domain()}/{_label(name)}")
     for line in r.stdout.splitlines():
         line = line.strip()
@@ -165,11 +179,63 @@ def write_plist(name: str, argv: list[str]) -> None:
     }, open(_plist(name), "wb"))
 
 
+UNITS = Path.home() / ".config" / "systemd" / "user"
+
+
+def _unit(name: str) -> Path:
+    return UNITS / f"claude-phone-{name}.service"
+
+
+def _systemctl(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["systemctl", "--user", *args], capture_output=True, text=True)
+
+
+def write_unit(name: str, argv: list[str]) -> None:
+    import shlex
+    UNITS.mkdir(parents=True, exist_ok=True)
+    out = config.LOGS / f"{name}.out"
+    _unit(name).write_text(f"""[Unit]
+Description=claude-phone {name}
+
+[Service]
+ExecStart={shlex.join(argv)}
+WorkingDirectory={config.HOME}
+Environment=PATH={Path.home() / ".local" / "bin"}:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=5
+StandardOutput=append:{out}
+StandardError=append:{out}
+
+[Install]
+WantedBy=default.target
+""")
+
+
+def _service(action: str, name: str) -> subprocess.CompletedProcess:
+    """start | stop | restart one service under whichever manager this computer has."""
+    if not config.MAC:
+        return _systemctl(action, _unit(name).name)
+    if action == "start":
+        return _launchctl("bootstrap", _domain(), str(_plist(name)))
+    if action == "stop":
+        return _launchctl("bootout", f"{_domain()}/{_label(name)}")
+    return _launchctl("kickstart", "-k", f"{_domain()}/{_label(name)}")
+
+
 def cmd_install_services(a) -> None:
     config.ensure_dirs()
     s = config.load()
     render_asterisk_config()
     ensure_model()
+    if not config.MAC:
+        for n in SERVICES:
+            _stop(n)  # anything started by hand
+            write_unit(n, SERVICES[n](s))
+        _systemctl("daemon-reload")
+        for n in SERVICES:
+            r = _systemctl("enable", "--now", _unit(n).name)
+            print(f"{n}: {'installed' if r.returncode == 0 else 'FAILED ' + r.stderr.strip()}")
+        return
     for n in SERVICES:
         _stop(n)  # anything started by hand
         _launchctl("bootout", f"{_domain()}/{_label(n)}")
@@ -179,6 +245,13 @@ def cmd_install_services(a) -> None:
 
 
 def cmd_uninstall_services(a) -> None:
+    if not config.MAC:
+        for n in SERVICES:
+            _systemctl("disable", "--now", _unit(n).name)
+            _unit(n).unlink(missing_ok=True)
+            print(f"{n}: removed")
+        _systemctl("daemon-reload")
+        return
     for n in SERVICES:
         _launchctl("bootout", f"{_domain()}/{_label(n)}")
         _plist(n).unlink(missing_ok=True)
@@ -192,9 +265,9 @@ def cmd_up(a) -> None:
     ensure_model()
     names = [a.only] if a.only else list(SERVICES)
     for n in names:
-        if _launchd(n):
-            r = _launchctl("bootstrap", _domain(), str(_plist(n)))
-            print(f"{n}: {'started' if r.returncode == 0 else 'already loaded'} (launchd)")
+        if _managed(n):
+            r = _service("start", n)
+            print(f"{n}: {'started' if r.returncode == 0 else 'already loaded'} ({MANAGER})")
             continue
         _spawn(n, SERVICES[n](s))
         if n == "asterisk":
@@ -206,19 +279,19 @@ def cmd_up(a) -> None:
 def cmd_down(a) -> None:
     names = [a.only] if a.only else list(reversed(list(SERVICES)))
     for n in names:
-        if _launchd(n):
-            _launchctl("bootout", f"{_domain()}/{_label(n)}")
-            print(f"{n}: stopped (launchd; `phone up` to start)")
+        if _managed(n):
+            _service("stop", n)
+            print(f"{n}: stopped ({MANAGER}; `phone up` to start)")
             continue
         _stop(n)
 
 
 def cmd_restart(a) -> None:
     names = [a.only] if a.only else list(SERVICES)
-    if all(_launchd(n) for n in names):
+    if all(_managed(n) for n in names):
         render_asterisk_config()
         for n in names:
-            r = _launchctl("kickstart", "-k", f"{_domain()}/{_label(n)}")
+            r = _service("restart", n)
             print(f"{n}: {'restarted' if r.returncode == 0 else 'FAILED ' + r.stderr.strip()}")
         return
     cmd_down(a)
@@ -230,8 +303,8 @@ def cmd_status(a) -> None:
     if w:
         print("WARNING:", w)
     for n in SERVICES:
-        pid = _agent_pid(n) if _launchd(n) else _pid(n)
-        how = " (launchd)" if _launchd(n) else ""
+        pid = _agent_pid(n) if _managed(n) else _pid(n)
+        how = f" ({MANAGER})" if _managed(n) else ""
         print(f"{n:9} {'running pid ' + str(pid) if pid else 'stopped'}{how}")
     try:
         with urllib.request.urlopen(f"{config.load().daemon_url}/health", timeout=3) as r:
@@ -310,7 +383,7 @@ def main() -> None:
         sp.add_argument("only", nargs="?", choices=list(SERVICES))
         sp.set_defaults(fn=fn)
     sub.add_parser("status").set_defaults(fn=cmd_status)
-    sub.add_parser("install-services", help="run everything under launchd").set_defaults(fn=cmd_install_services)
+    sub.add_parser("install-services", help="run everything now and at every login (launchd or systemd)").set_defaults(fn=cmd_install_services)
     sub.add_parser("uninstall-services").set_defaults(fn=cmd_uninstall_services)
     sub.add_parser("list").set_defaults(fn=cmd_list)
     sub.add_parser("vm", help="pending voicemail questions").set_defaults(fn=cmd_vm)
@@ -319,7 +392,7 @@ def main() -> None:
     sp.set_defaults(fn=cmd_hook)
     sub.add_parser("daemon").set_defaults(fn=cmd_daemon)
     sub.add_parser("mcp").set_defaults(fn=cmd_mcp)
-    sp = sub.add_parser("secret", help="print (creating if needed) a keychain secret: sip | ari")
+    sp = sub.add_parser("secret", help="print (creating if needed) a secret: sip | ari")
     sp.add_argument("name", choices=["sip", "ari"])
     sp.set_defaults(fn=cmd_secret)
     sp = sub.add_parser("hold-music", help="generate new hold music with ElevenLabs Music")

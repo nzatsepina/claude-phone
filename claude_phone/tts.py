@@ -8,6 +8,7 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -22,8 +23,11 @@ class Provider:
 
 
 def _to_wav16(src: Path, dst: Path) -> None:
-    subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", str(src), str(dst)],
-                   check=True, capture_output=True)
+    if config.MAC:
+        cmd = ["afconvert", "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", str(src), str(dst)]
+    else:
+        cmd = ["sox", str(src), "-r", "16000", "-c", "1", "-b", "16", "-e", "signed-integer", str(dst)]
+    subprocess.run(cmd, check=True, capture_output=True)
 
 
 class Say(Provider):
@@ -35,6 +39,37 @@ class Say(Provider):
             aiff = Path(td) / "t.aiff"
             subprocess.run(["say", "-v", voice, "-o", str(aiff), text], check=True, capture_output=True)
             _to_wav16(aiff, out_wav)
+
+
+class Piper(Provider):
+    """Piper (https://github.com/OHF-Voice/piper1-gpl): free, offline neural voices for Linux and WSL.
+    Voices download into ~/.claude-phone/voices on first use and stay loaded in the daemon."""
+    name = "piper"
+
+    def __init__(self):
+        self.loaded: dict[str, object] = {}
+        self.lock = threading.Lock()
+
+    def voice(self, name: str):
+        with self.lock:
+            if name not in self.loaded:
+                from piper import PiperVoice
+                from piper.download_voices import download_voice
+                model = config.VOICES / f"{name}.onnx"
+                if not model.exists():
+                    config.VOICES.mkdir(parents=True, exist_ok=True)
+                    download_voice(name, config.VOICES)
+                self.loaded[name] = PiperVoice.load(str(model))
+            return self.loaded[name]
+
+    def render(self, text: str, voice: str | None, out_wav: Path) -> None:
+        import wave
+        v = self.voice(voice or config.load().piper_voice)
+        with tempfile.TemporaryDirectory() as td:
+            raw = Path(td) / "t.wav"  # Piper's own rate (22.05 kHz for medium voices)
+            with wave.open(str(raw), "wb") as w:
+                v.synthesize_wav(text, w)
+            _to_wav16(raw, out_wav)
 
 
 class ElevenLabs(Provider):
@@ -65,7 +100,9 @@ def _write_wav(path: Path, pcm: bytes, rate: int) -> None:
         w.writeframes(pcm)
 
 
-PROVIDERS: dict[str, Provider] = {p.name: p for p in (Say(), ElevenLabs())}
+PROVIDERS: dict[str, Provider] = {p.name: p for p in (Say(), Piper(), ElevenLabs())}
+# The offline voice every call falls back to.
+LOCAL = "say" if config.MAC else "piper"
 
 
 def voice_for(repo: str | None) -> tuple[str, str | None]:
@@ -80,7 +117,7 @@ def render(text: str, repo: str | None = None, voice: tuple[str, str | None] | N
     provider, voice = voice or voice_for(repo)
     if not voice:  # name the default voice in the cache key, so changing it in config isn't masked by old speech
         s = config.load()
-        voice = s.say_voice if provider == "say" else s.elevenlabs_voice_id
+        voice = {"say": s.say_voice, "piper": s.piper_voice}.get(provider, s.elevenlabs_voice_id)
     key = hashlib.sha256(json.dumps([provider, voice, text]).encode()).hexdigest()[:20]
     base = config.SOUNDS / "tts" / key
     out = base.with_suffix(".wav16")
@@ -92,9 +129,9 @@ def render(text: str, repo: str | None = None, voice: tuple[str, str | None] | N
         try:
             PROVIDERS[provider].render(text, voice, tmp)
         except Exception:
-            if provider == "say":
+            if provider == LOCAL:
                 raise
-            PROVIDERS["say"].render(text, None, tmp)  # never leave a call silent
+            PROVIDERS[LOCAL].render(text, None, tmp)  # never leave a call silent
         tmp.rename(out)
     return f"sound:{base}"
 

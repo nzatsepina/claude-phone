@@ -9,7 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import log, registry
+from . import inject, log, registry
 
 
 def _git(cwd: str, *args: str) -> str | None:
@@ -33,8 +33,12 @@ def repo_info(cwd: str) -> tuple[str, str | None, str | None]:
     return repo, branch, worktree
 
 
-def iterm_unique_id() -> str | None:
-    """ITERM_SESSION_ID looks like 'w3t0p0:<UUID>'; AppleScript's `unique id` is the UUID part."""
+def terminal_id() -> str | None:
+    """The terminal this process runs in, as inject addresses it. ITERM_SESSION_ID looks like 'w3t0p0:<UUID>';
+    AppleScript's `unique id` is the UUID part. Inside tmux (checked first, since tmux can run in iTerm2): the pane."""
+    tmux = inject.tmux_id(os.environ.get("TMUX"), os.environ.get("TMUX_PANE"))
+    if tmux:
+        return tmux
     v = os.environ.get("ITERM_SESSION_ID")
     return v.split(":", 1)[1] if v and ":" in v else v
 
@@ -50,9 +54,9 @@ def run(event: str) -> int:
             return 0  # subagent events share the parent's session; nothing to register
         if event == "session-start":
             cwd = payload.get("cwd") or os.getcwd()
-            iterm = iterm_unique_id()
+            iterm = terminal_id()
             if not iterm:
-                return 0  # not in iTerm2: nothing we could type into
+                return 0  # not in iTerm2 or tmux: nothing we could type into
             repo, branch, worktree = repo_info(cwd)
             s = registry.register(sid, repo, branch, worktree, cwd, iterm)
             registry.ringtone(repo)  # assign on first sight so repos get distinct rings
