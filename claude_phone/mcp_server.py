@@ -1,5 +1,5 @@
 """stdio MCP server exposing call_<owner>, notify_<owner> and transfer_call. One instance per Claude Code session; Claude Code passes
-CLAUDE_CODE_SESSION_ID and ITERM_SESSION_ID in the env, which identify the calling session."""
+CLAUDE_CODE_SESSION_ID and ITERM_SESSION_ID (or TMUX and TMUX_PANE) in the env, which identify the calling session."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import aiohttp
 from mcp.server.mcpserver import MCPServer
 
 from . import config
-from .hooks import iterm_unique_id
+from .hooks import terminal_id
 
 mcp = MCPServer("claude-phone")
 
@@ -18,7 +18,7 @@ def _body(**kw) -> dict:
     return {
         **kw,
         "session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"),
-        "iterm_id": iterm_unique_id(),
+        "iterm_id": terminal_id(),
         "cwd": os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd(),
     }
 

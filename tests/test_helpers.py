@@ -72,8 +72,39 @@ def test_changing_the_default_voice_renders_new_speech(monkeypatch):
     from claude_phone import config
     rendered = []
     monkeypatch.setattr(tts.PROVIDERS["say"], "render", lambda text, voice, out: (rendered.append(voice), out.write_bytes(b"")))
-    monkeypatch.setattr(config, "load", lambda: Settings(say_voice="Daniel"))
+    monkeypatch.setattr(config, "load", lambda: Settings(tts_provider="say", say_voice="Daniel"))
     a = tts.render("Hello there.")
-    monkeypatch.setattr(config, "load", lambda: Settings(say_voice="Fiona"))
+    monkeypatch.setattr(config, "load", lambda: Settings(tts_provider="say", say_voice="Fiona"))
     b = tts.render("Hello there.")
     assert a != b and rendered == ["Daniel", "Fiona"]
+
+
+def test_tmux_pane_ids():
+    from claude_phone import inject
+    tid = inject.tmux_id("/tmp/tmux-1000/default,4211,0", "%3")
+    assert tid == "tmux:/tmp/tmux-1000/default:%3"
+    assert inject._split(tid) == ("/tmp/tmux-1000/default", "%3")
+    assert inject.tmux_id(None, "%3") is None and inject.tmux_id("/tmp/s,1,0", None) is None
+
+
+def test_terminal_id_prefers_tmux_over_iterm(monkeypatch):
+    from claude_phone import hooks
+    monkeypatch.setenv("ITERM_SESSION_ID", "w0t1p0:ABC-123")
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.delenv("TMUX_PANE", raising=False)
+    assert hooks.terminal_id() == "ABC-123"
+    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,4211,0")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    assert hooks.terminal_id() == "tmux:/tmp/tmux-1000/default:%7"
+
+
+def test_secrets_file_off_mac(monkeypatch):
+    import os
+    from claude_phone import config, keychain
+    monkeypatch.setattr(config, "MAC", False)
+    keychain.SECRETS_FILE.unlink(missing_ok=True)
+    sip = keychain.get_or_create("sip")
+    assert keychain.get_or_create("sip") == sip
+    keychain.put("ntfy", "topic")
+    assert (keychain.get("sip"), keychain.get("ntfy")) == (sip, "topic")
+    assert os.stat(keychain.SECRETS_FILE).st_mode & 0o077 == 0

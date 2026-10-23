@@ -111,7 +111,7 @@ class Controller:
             if missing == 2:
                 lg.warning(warning)
             try:
-                live = await asyncio.to_thread(inject.live_iterm_ids)
+                live = await asyncio.to_thread(inject.live_terminal_ids)
                 for s in registry.remove_missing(live):
                     lg.info("removed stale session ext=%s %s", s.ext, s.label)
             except Exception as e:
@@ -663,7 +663,7 @@ async def main() -> None:
 
 
 async def serve_phonebook(runner: web.AppRunner, s: config.Settings) -> None:
-    """The phonebook binds to the home LAN address, which is missing while the Mac is on another network.
+    """The phonebook binds to the home LAN address, which is missing while this computer is on another network.
     Keep retrying rather than taking the daemon (and missed-call pushes) down with it."""
     while True:
         try:

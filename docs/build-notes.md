@@ -1,6 +1,6 @@
 # Build notes
 
-What it took to get each piece working on an Apple Silicon Mac (macOS 27), and why. `scripts/build-asterisk.sh`
+What it took to get each piece working on an Apple Silicon Mac (macOS 27), and why (Linux and WSL: section 7). `scripts/build-asterisk.sh`
 and `asterisk/*.tmpl` already apply all of this; read it when something breaks.
 
 ## 1. Asterisk: native build (no Homebrew formula; Docker not needed)
@@ -63,3 +63,23 @@ Claude Code moves MCP calls that run longer than 120 s to the background
   names are passed as the prompt, or names like "lemon stand" come back as near-misses.
   large-v3-turbo matched or beat base.en on every real clip at about 0.3 s each; 8 kHz phone audio is fine.
 - **Text to speech:** macOS `say` works out of the box (UK voices: Daniel, Shelley, Fiona…); ElevenLabs is optional.
+
+## 7. Linux and WSL
+
+`config.MAC` picks the macOS pieces; everywhere else gets these:
+
+- **Typing: tmux.** There is no AppleScript, and Windows Terminal can't be scripted from WSL. `tmux send-keys -l`
+  types the text literally into a pane, then `Enter` goes separately, as with iTerm2. Hooks and the MCP server
+  see `$TMUX` (`<socket>,<pid>,<session>`) and `$TMUX_PANE` (`%3`); the registry stores `tmux:<socket>:<pane>`,
+  so the daemon can address the pane from outside tmux. Panes missing from `tmux list-panes -a` are swept as
+  closed sessions; "no server running" means all of them are.
+- **Speech: Piper** (`piper-tts`, a pip dependency off macOS). The daemon keeps each voice loaded (about 0.2 s
+  per sentence after a ~2 s first load). Piper's medium voices are 22.05 kHz, so `sox` resamples to 16 kHz
+  where `afconvert` does on a Mac.
+- **Secrets:** WSL rarely has a keyring daemon, so `~/.claude-phone/secrets.json`, mode 600.
+- **Services:** systemd user units in `~/.config/systemd/user/claude-phone-*.service`, with lingering on.
+- **LAN address:** a connected UDP socket's source address (nothing is sent), and `/proc/net/fib_trie` for
+  every local address, so no `ip`/`ifconfig` is needed.
+- **Asterisk:** builds against the system OpenSSL with none of the macOS fixes 1-4; 5-7 still apply.
+- **WSL networking:** mirrored mode (`networkingMode=mirrored`) puts WSL on the PC's LAN address; NAT mode can't
+  receive the phone's UDP. Hyper-V's firewall needs an inbound rule for 5060 and the RTP range.
